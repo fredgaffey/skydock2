@@ -1,110 +1,140 @@
-# skydock2
+# Skydock
 
-Autonomous agricultural spray drone. A Raspberry Pi 5 companion computer runs a
-mission finite-state machine that scans a field with a Hailo AI camera, clusters
-weed detections, then flies to and "sprays" each weed. Flight is executed by an
-ArduPilot flight controller; the Pi talks to it over MAVLink (`pymavlink`).
+An autonomous weed-spraying UAV. It flies a lawnmower pattern over a field,
+spots weeds with an on-board AI camera, works out where each one is on the ground,
+then flies back to each weed, lines itself up directly overhead and sprays it.
+Once the pilot flips it into autonomous mode, it needs no input until it heads home.
 
-The same code runs against ArduPilot **SITL** for development, with a simulated
-camera (`sim_ai.py`) that projects known weed locations into synthetic detections.
+## The first full autonomous mission
 
-## Stack
+**8 August 2026.** On the left, a phone filming from the ground. On the right, what
+the UAV saw, synced to the same clock and rendered from the flight log. It
+scans the field, picks out the target, flies to it, homes in and sprays.
 
-| Layer | What |
-|-------|------|
-| Flight controller | ArduPilot (Copter), MAVLink over serial (real) or UDP (sim) |
-| Companion computer | Raspberry Pi 5 |
-| AI camera | Hailo-8 on RPi5 (`hailo-rpi5-examples/`, vendored); sim equivalent in `sim_ai.py` |
-| Language | Python 3 (numpy, pymavlink, pyserial, SQLAlchemy; Flask for the log viewer) |
-| Persistence | Per-mission SQLite DB + `mission.jsonl` event log |
+[![Ground view and on-board camera view of the first full autonomous mission (click to play)](docs/readme/real-mission-poster.jpg)](https://youtu.be/gQA05xkfV48)
 
-## Repository layout
+**[Watch on YouTube](https://youtu.be/gQA05xkfV48)**
 
-| Path | Purpose |
-|------|---------|
-| [main.py](main.py) | Entry point: connect telemetry, load mission, run the FSM loop |
-| [fsm.py](fsm.py) | `StateMachine` — dispatches per-tick to a state handler |
-| [states/](states/) | One module per state: `override`, `scan`, `goto`, `homing`, `spray`, `rtl` (+ `enum`, `shared_data`) |
-| [telemetry.py](telemetry.py) | MAVLink connection, background reader thread, movement commands |
-| [drone_state.py](drone_state.py) | `DroneStateForHoming` telemetry snapshot + attitude/position interpolation |
-| [ai_class.py](ai_class.py) | `Detection`, `Frame`, and the thread-safe `ai_storage_singleton` |
-| [sim_ai.py](sim_ai.py) | Simulated camera: projects weed GPS to pixel detections |
-| [utils.py](utils.py) | Pure geometry: haversine, pixel↔NED↔lat/lon projection |
-| [DB.py](DB.py) / [DB_abstraction.py](DB_abstraction.py) | SQLAlchemy models and the high-level DB API |
-| [mission_gen.py](mission_gen.py) | Build a lawnmower scan path / mission JSON from weed locations |
-| [mission_logging.py](mission_logging.py) | Allocate `missions/NNNN/`, write `mission.jsonl` |
-| [sitl.py](sitl.py) | Launch and configure ArduPilot SITL |
-| [constants.py](constants.py) | Mission tunables (heights, speeds, thresholds, timeouts) |
-| [tools/](tools/) | Offline analysis: `fsm_analyze`, `make_video`, `sim_accuracy`, and the Flask `log_server` mission viewer |
-| [tests/](tests/) | Pytest suite (runs with no hardware/SITL) |
-| [docs/](docs/) | Architecture, testing guide, SITL guide, code review, refactor plan |
-| `archive/`, `hailo-rpi5-examples/` | Dead/experimental code and vendored Hailo examples (out of scope) |
+## How it works
 
-See [docs/architecture.md](docs/architecture.md) for diagrams and data flow.
+1. **Scan.** Fly a lawnmower path at 10 m, logging every AI detection with the
+   UAV's position and attitude at that instant.
+2. **Cluster.** Project each detection from pixels to a GPS point on the ground,
+   then group nearby hits into weed locations. A weed needs several independent
+   detections before it counts.
+3. **Go to** the nearest unsprayed weed.
+4. **Home.** Use the live camera to close the last few metres, descending
+   until the weed sits directly under the nozzle.
+5. **Spray**, mark it done and move to the next one. Return to launch when the
+   list is empty.
 
-## Running in simulation
+The pilot can take over at any time from the RC transmitter. A 3-position switch
+turns autonomy on or off, and battery and failsafe handling stays with ArduPilot.
 
-Requires Linux with ArduPilot SITL installed (`sim_vehicle.py` on PATH via
-`~/venv-ardupilot`) and `xterm`. See [docs/skydock_sitl_guide.md](docs/skydock_sitl_guide.md)
-for full setup.
+The state machine as I designed it:
+
+![Finite state machine: Scan, Goto, Homing, Spray, RTL and manual override](docs/readme/fsm.png)
+
+The system: ArduPilot flight controller <-> Raspberry Pi 5 companion computer
+(MAVLink) <-> Hailo AI accelerator and camera:
+
+![System architecture diagram](docs/readme/system-architecture.png)
+
+And the homing logic, including the camera-geometry sketch it's built from:
+
+![Homing function design](docs/readme/homing-design.png)
+
+| | |
+|---|---|
+| Flight controller | ArduPilot Copter |
+| Companion computer | Raspberry Pi 5, Python |
+| AI | Hailo-8 accelerator + camera, object detection at up to 60 fps |
+| Simulation | ArduPilot SITL with a simulated camera, so the same code flies in sim and for real |
+| Analysis | Per-flight logs + a web app to replay, compare and render every mission |
+
+## Timeline
+
+### 2025: early airframes
+Before this codebase, I was experimenting with airframes, starting with a fixed-wing
+VTOL conversion.
+
+<img src="docs/readme/2025-07-27_vtol-top-down.jpg" width="420" alt="VTOL airframe, top-down">
+
+### January 2026: project start
+- Repository started. MAVLink link to the flight controller working.
+- Hailo AI pipeline running on the Raspberry Pi 5.
+- First homing function, tested on the ground.
+
+### February 2026: system design
+- Drew up the system architecture and the state machine (diagrams above).
+- Built the mission database, the FSM skeleton, a logger and a video stitcher
+  for debugging flights.
+- Started testing on the final UAV.
+
+### March 2026: the quadcopter build
+- Built the quad with the Pi and AI camera on board.
+- Built a web UI for browsing flight logs.
+- Made the simulator run faster than real time, and started unifying the sim
+  and real code paths.
+
+<img src="docs/readme/2026-03-10_quad-build-with-pi-top-down.jpg" width="300" alt="Quad build with Raspberry Pi, top-down"> <img src="docs/readme/2026-03-10_quad-build-side.jpg" width="300" alt="Quad build, side view">
+
+### April 2026: new frame and field testing
+- Moved to a new carbon-frame quad.
+- Moved from the backyard to an open field, with a ground station (RC transmitter
+  plus laptop).
+- Lowered the scan height after detections proved unreliable from higher up.
+- Sim and real now run through the same code.
+
+<img src="docs/readme/2026-06-27_carbon-quad-front.jpg" width="300" alt="Carbon-frame quad, front"> <img src="docs/readme/2026-06-27_carbon-quad-top-down.jpg" width="300" alt="Carbon-frame quad, top-down">
+
+<img src="docs/readme/2026-04-12_quad-in-flight.jpg" width="300" alt="Quad in flight"> <img src="docs/readme/2026-04-12_ground-station-rc-and-laptop.jpg" width="300" alt="Ground station: RC transmitter and laptop">
+
+### May 2026: real-world flight data
+- Every real flight now logged on the Pi and synced back for analysis.
+- Fixes found from real data: waiting for the first attitude message before
+  projecting detections, score-based detection picking during homing, and the
+  camera pipeline raised to 60 fps.
+- Tried a long-range RFD900 radio link to the Pi, then switched to a Wi-Fi
+  network because the RFD900 was too slow. No code changes were needed; the
+  switch was entirely in how the autopilot link was set up.
+
+### June 2026: better tooling
+- Overhauled mission logging into a single versioned format, and added an
+  automated test suite.
+- The log viewer gained a live ground-control panel.
+
+### July 2026: first successful homing
+- Found and fixed the "homing-blind" bug: the real camera resolution never
+  reached the projection code, so homing was steering from bad numbers.
+- Verified the camera's mounting orientation from pixel motion in flight logs.
+- **11 July: first successful homing.** The UAV found the target, flew over
+  it, centred itself and sprayed.
+
+![On-board camera during the first successful homing](docs/readme/first-homing-spray.jpg)
+
+### August 2026: full autonomous missions
+- **8 August: first full mission**, scan, go to, home, spray, with no pilot
+  input once autonomy was switched on.
+  **[Watch it on YouTube](https://youtu.be/gQA05xkfV48)**
+- PID control for homing, measured simulator speed, a tool to tune clustering
+  constants offline, and CI.
+
+### Next
+- A testing ladder from Monte Carlo runs in simulation, to bench tests that
+  measure the real detector's miss rate, to constrained flights.
+- Then tune each constant against measurements, changing one thing per flight.
+- Separate detection models for scanning (high up) and homing (close in).
+
+## Running it
 
 ```bash
-pip install -r requirements.txt
-python main.py --sim                 # default sim_data mission
-python main.py --sim --speed 5       # 5x SITL speedup
+python main.py --sim          # full mission in ArduPilot SITL
+python main.py                # on the UAV
+python tools/log_server/app.py   # flight log viewer at http://localhost:5050
+python -m pytest              # tests
 ```
 
-`--sim` starts SITL, arms and takes off automatically, runs the simulated camera,
-and drives the FSM. Mission artifacts are written to `missions/NNNN/`.
-
-## Running on the real drone
-
-On the Pi, with the flight controller connected over USB and the Hailo camera
-pipeline available:
-
-```bash
-pip install -r requirements.txt
-python main.py                       # prompts for a mission file, then takeoff
-```
-
-`main.py` lists existing `real_missions/*.json` or records a new one by walking
-the drone over each weed and capturing GPS. Autonomy is gated by a 3-position RC
-switch (channel 16). Battery / failsafe handling is delegated to the ArduPilot
-flight controller: when the FC switches to RTL, the FSM detects `mode == "RTL"`
-and stops.
-
-## Mission artifacts
-
-Each run creates `missions/NNNN/`:
-
-| File | Contents |
-|------|----------|
-| `droneDB.db` | SQLite: waypoints, weeds, drone_states, detections |
-| `mission.jsonl` | One JSON object per line: state transitions, telemetry samples, move commands, detections, spray events |
-| `database_snapshot.json` | JSON dump of the DB written by `backup_and_clear` at mission load |
-
-Review them with the log server: `python -m pytest`-free, run
-`python tools/log_server/app.py` (needs `flask`).
-
-## Tests
-
-The flight-stack suite runs on a laptop — no drone, no SITL (telemetry is mocked,
-the DB uses temp SQLite):
-
-```bash
-python -m venv .venv && source .venv/bin/activate
-pip install -r requirements-dev.txt
-python -m pytest                                  # flight stack (tests/)
-pip install flask && python -m pytest tools/log_server/tests/   # log viewer
-```
-
-See [docs/testing.md](docs/testing.md) for how the suite stubs hardware and how to
-add tests for new states.
-
-## More docs
-
-- [docs/architecture.md](docs/architecture.md) — system diagram, FSM, homing flow, DB schema, design-vs-implementation drift
-- [docs/testing.md](docs/testing.md) — test architecture and conventions
-- [docs/skydock_sitl_guide.md](docs/skydock_sitl_guide.md) — SITL setup
-- [docs/code_review_2026-06-13.md](docs/code_review_2026-06-13.md) — code review findings
-- [docs/refactor_plan.md](docs/refactor_plan.md) — phased follow-up work
+Setup, repository layout, the log format and the test suites are covered in the
+**[developer guide](docs/developer_guide.md)**. See also
+[architecture](docs/architecture.md) and [testing](docs/testing.md).

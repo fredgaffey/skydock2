@@ -239,3 +239,6 @@ yolov8m.pt
 yolov8n.pt
 yolov8s.pt
 yolov8x.pt
+
+# Full-quality media originals (web-sized copies live in media/)
+media_full/
